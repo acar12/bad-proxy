@@ -1,7 +1,8 @@
 import asyncio
 import re
 
-pattern = re.compile(r"(?P<method>[a-zA-Z]+) (?P<uri>(\w+://)?(?P<host>[^\s\'\"<>\[\]{}|/:]+)(:(?P<port>\d+))?[^\s\'\"<>\[\]{}|]*) ")
+request_pattern = re.compile(r"(?P<method>[a-zA-Z]+) (?P<uri>(\w+://)?(?P<host>[^\s\'\"<>\[\]{}|/:]+)(:(?P<port>\d+))?[^\s\'\"<>\[\]{}|]*) ")
+blacklist_pattern = re.compile(r"^(www.)?(amazon|walmart|target|ebay).com$")
 
 async def transfer_stream(reader, writer, close_event):
     while not close_event.is_set():
@@ -20,26 +21,25 @@ async def transfer_stream(reader, writer, close_event):
 
 async def handle_conn(reader, writer):
     client_request = (await reader.readuntil(b"\r\n\r\n")).decode()
-    
     if client_request.startswith("CONNECT"):
-        request_regex = pattern.match(client_request)
-
+        request_regex = request_pattern.match(client_request)
         if request_regex:
-            ws_reader, ws_writer = await asyncio.open_connection(request_regex.group("host"), request_regex.group("port"))
-            print("Connecting to", request_regex.group("host"), ":", request_regex.group("port"))
-
-            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            await writer.drain()
-
-            print("Connection made.")
-            close_event = asyncio.Event()
-            await asyncio.gather(
-                transfer_stream(reader, ws_writer, close_event),
-                transfer_stream(ws_reader, writer, close_event)
-            )
-        else:
-            writer.close()
-
+            if not blacklist_pattern.match(request_regex.group("host")):
+                ws_reader, ws_writer = await asyncio.open_connection(request_regex.group("host"), request_regex.group("port"))
+                print("Connecting to", request_regex.group("host"), ":", request_regex.group("port"))
+                writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                await writer.drain()
+                print("Connection made.")
+                close_event = asyncio.Event()
+                await asyncio.gather(transfer_stream(reader, ws_writer, close_event),
+                    transfer_stream(ws_reader, writer, close_event))
+            else:
+                print("Attempted to visit blocked website.")
+                html_response = "HTTP/1.1 502 Bad Gateway\nContent-Type: text/html\nContent-Length: %d\n\n%s"
+                html = "<!DOCTYPE html><html><body><h1>Blocked Website</h1></body></html>"
+                writer.write((html_response % (len(html.encode("utf-8")), html)).encode("utf-8"))
+                await writer.drain()
+    writer.close()
 
 async def main():
     server = await asyncio.start_server(handle_conn, "127.0.0.1", 8544)
